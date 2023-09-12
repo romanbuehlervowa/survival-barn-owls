@@ -1,0 +1,509 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+-------------------------------------------------------------------------------------------------------------------------------------
+Individual quality and environmental factors interact to shape reproduction and survival in a resident bird of prey
+
+Roman Bühler, Thomas V. Riecke, Kim Schalcher, Alexandre Roulin and Bettina Almasi
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------
+
+The complete code is written in R Version: 4.1.2
+
+ATTENTION: Be aware that changes to the JAGS algorithm between versions and the simulation of the posterior distribution can 
+lead to slight changes in the estimated coefficients, but they do not change the obtained results described in the publication.
+
+ 
+
+load packages and data and scale mat function
+
+```{r}
+rm(list=ls())
+
+library(jagsUI)
+library(vioplot)
+library(reshape2)
+library(RColorBrewer)
+library(tictoc)
+library(tidyverse)
+library(gridExtra)
+library(ggforce)
+library(beepr)
+library(matrixStats)
+library(scales)
+
+load("Dataset Buehler et al. 2023.Rdata")
+
+#function to scale over the whole matrix and not only column wise
+scale.mat<-function(mat){
+  sd=sd(mat, na.rm=T)
+  mean=mean(mat, na.rm=T)
+  mat<-(mat-mean)/sd
+}
+
+```
+
+Explanation of the matrices in the dataset
+
+alive: alive matrix, 1 if found alive, 0 if not seen alive
+dead: dead matrix, 1 if found dead, 0 if not found dead
+sex: 1=female, 2=male
+gps: equipped=2, not equipped=1
+age.cat: 1=yearling, 2=older
+egg2: number of total eggs produced during the season
+nestling2: total number of nestlings per season
+fledge2: number of total fledglings per season
+col: coloration from white to brown
+col.p: diameter of black points on plumage
+cort.b: baseline corticosteroid
+cort.r: response corticosteroid
+lay: laying date, numeric, origin="1970-01-01"
+BCIe: Body condition index during egg laying period
+BCIn: Body condition index during brood rearing period
+
+
+```{r, eval=F}
+
+save(alive,dead,sex,gps,age.cat,egg2,nestling2,fledge2,col,col.p,cort.b,cort.r,lay,BCIe,BCIn,preytot.lay.pl,preytot.play.pl,preytot.nestling.pl,preytot.w1.pl,preytot.lay.tr,preytot.play.tr,preytot.nestling.tr,preytot.w1.tr,file="Dataset Buehler et al. 2023.Rdata")
+
+
+
+
+```
+
+
+
+data formatting
+
+cleanup
+```{r}
+n.years <- ncol(alive)
+
+#eliminate juvenile encounters/releases
+
+alive[age.cat == 0] <- 0
+table(age.cat,alive)
+
+
+##get first alive encounters
+
+get.f <- function(x){min(which(x == 1))}
+f <- apply(alive, 1, get.f)
+
+
+```
+
+
+
+as we need at least one coloration value to extrapolate we attribute the mean of each individual to the first encounter, if the bird was never measured we attribute the sex specific mean over all years
+
+```{r}
+
+col.init<-col
+
+#for col
+for (i in 1:nrow(col)){
+  if(!is.na(col[i,f[i]])) next
+  rowmean<-sum(col.init[i,], na.rm=T)/length(which(col.init[i,]>0))
+  if(is.na(rowmean)& sex[i]==1){col[i,f[i]]<-mean(col.init[which(sex==1),], na.rm=T)}
+  if(is.na(rowmean)& sex[i]==2){col[i,f[i]]<-mean(col.init[which(sex==2),], na.rm=T)}
+  if(!is.na(rowmean)){col[i,f[i]]<-rowmean}
+}
+col<-round(col, digits=2)
+
+#for col.p
+
+col.p.init<-col.p
+
+for (i in 1:nrow(col.p)){
+  if(!is.na(col.p[i,f[i]])) next
+  rowmean<-sum(col.p.init[i,], na.rm=T)/length(which(col.p.init[i,]>0))
+  if(is.na(rowmean)& sex[i]==1){col.p[i,f[i]]<-mean(col.p.init[which(sex==1),], na.rm=T)}
+  if(is.na(rowmean)& sex[i]==2){col.p[i,f[i]]<-mean(col.p.init[which(sex==2),], na.rm=T)}
+  if(!is.na(rowmean)){col.p[i,f[i]]<-rowmean}
+}
+col.p<-round(col.p, digits=2)
+```
+
+we need to do the same for corticosterone but here we take year specific mean
+
+```{r}
+#for cort.b
+
+cort.b.init<-cort.b
+
+
+for (i in 1:nrow(cort.b)){
+  if(!is.na(cort.b[i,f[i]])) next
+  rowmean<-sum(cort.b.init[i,], na.rm=T)/length(which(cort.b.init[i,]>0))
+  if(is.na(rowmean)& sex[i]==1){cort.b[i,f[i]]<-mean(cort.b.init[,f[i]], na.rm=T)}
+  if(is.na(rowmean)& sex[i]==2){cort.b[i,f[i]]<-mean(cort.b.init[,f[i]], na.rm=T)}
+  if(!is.na(rowmean)){cort.b[i,f[i]]<-rowmean}
+}
+cort.b<-round(cort.b, digits=2)
+
+
+
+
+#for cort.r
+
+cort.r.init<-cort.r
+
+for (i in 1:nrow(cort.r)){
+  if(!is.na(cort.r[i,f[i]])) next
+  rowmean<-sum(cort.r.init[i,], na.rm=T)/length(which(cort.r.init[i,]>0))
+  if(is.na(rowmean)& sex[i]==1){cort.r[i,f[i]]<-mean(cort.r.init[,f[i]], na.rm=T)}
+  if(is.na(rowmean)& sex[i]==2){cort.r[i,f[i]]<-mean(cort.r.init[,f[i]], na.rm=T)}
+  if(!is.na(rowmean)){cort.r[i,f[i]]<-rowmean}
+}
+cort.r<-round(cort.r, digits=2)
+
+```
+
+
+make gps mat a 1/2 mat instead of 0/1
+
+```{r}
+gps<-gps+1
+```
+
+make age 0/1 instead of 1/2
+```{r}
+age.cat<-age.cat-1
+
+age.cat[age.cat<0]<-NA
+```
+
+get dead recoveries
+
+```{r}
+d <- apply(dead, 1, get.f)
+d[d == Inf] <- NA
+table(f,d)
+
+```
+
+get last alive encounter
+
+```{r}
+get.l <- function(x){max(which(x == 1))}
+l <- apply(alive, 1, get.l)
+```
+
+fill in known latent states
+
+```{r}
+z <- matrix(NA, nrow(alive), ncol(alive))
+for (i in 1:nrow(z)){
+  if (l[i] > f[i]){
+    z[i, f[i]:l[i]] <- 1
+  }
+  if (!is.na(d[i])){
+    z[i, f[i]:(d[i]-1)] <- 1
+  }
+  z[i,f[i]] <- NA
+}
+```
+
+calculate laying date as days from 01.01 of every year
+```{r}
+lay.d<-lay
+
+as.Date(17167, origin="1970-01-01")
+as.Date(17532, origin="1970-01-01")
+as.Date(17897, origin="1970-01-01")
+as.Date(18262, origin="1970-01-01")
+as.Date(18628, origin="1970-01-01")
+
+
+lay.d[,1]<-lay.d[,1]-17167
+lay.d[,2]<-lay.d[,2]-17532
+lay.d[,3]<-lay.d[,3]-17897
+lay.d[,4]<-lay.d[,4]-18262
+lay.d[,5]<-lay.d[,5]-18628
+
+```
+
+
+We do not predict for the fifth year and thus need to remove the values from the dataset, otherwise we will include them while scaling
+```{r}
+BCIe[,5]<- NA
+BCIn[,5]<- NA
+cort.b[,5]<- NA
+cort.r[,5]<- NA
+col.p[,5]<- NA
+col[,5]<- NA
+egg2[,5]<- NA
+fledge2[,5]<- NA
+nestling2[,5]<- NA
+lay.d[,5]<- NA
+```
+
+scale matrices
+```{r}
+BCIe.x<-scale.mat(BCIe)
+BCIn.x<-scale.mat(BCIn)
+cort.b.x<-scale.mat(cort.b)
+cort.r.x<-scale.mat(cort.r)
+col.x<-scale.mat(col)
+col.p.x<-scale.mat(col.p)
+lay.d.x<-scale.mat(lay.d)
+
+
+
+preytot.lay.pl.x<-scale.mat(preytot.lay.pl)
+preytot.play.pl.x<-scale.mat(preytot.play.pl)
+preytot.nestling.pl.x<-scale.mat(preytot.nestling.pl)
+preytot.w1.pl.x<-scale.mat(preytot.w1.pl)
+preytot.lay.tr.x<-scale.mat(preytot.lay.tr)
+preytot.play.tr.x<-scale.mat(preytot.play.tr)
+preytot.nestling.tr.x<-scale.mat(preytot.nestling.tr)
+preytot.w1.tr.x<-scale.mat(preytot.w1.tr)
+
+
+```
+
+##D.1 first and second brood
+
+```{r}
+sink("D.1.jags")
+cat("
+    model {
+
+    for (j in 1:2){
+      alpha[j,1] ~ dnorm(1, 0.1)                                  #sex specific prior for alpha 1, Intercept number of eggs
+      beta[j,1] ~ dunif(-10, 10)                                  #sex specific prior for beta 1, Intercept hatching success
+      gamma[j,1] ~ dunif(-10, 10)                                 #sex specific prior for gamma 1, Intercept fledging success
+      delta[j,1] ~ dnorm(0, 0.44)                                 #sex specific prior for delta 1, Intercept survival
+      
+      sigma.col.p[j] ~ dunif(0,10)                                #sex specific prior for precision coloration                           
+      tau.col.p[j] = 1/(sigma.col.p[j] * sigma.col.p[j])          #sex specific prior for precisicion coloration
+      
+      for (k in 2:5){
+      alpha[j,k] ~ dnorm(0, 0.1)                                  #sex specific prior for alphas, beta coefficients number of eggs
+      }
+
+      for (k in 2:7){
+      beta[j,k] ~ dunif(-10, 10)                                  #sex specific prior for betas, beta coefficients hatching success
+      }
+      
+      for (k in 2:7){
+      gamma[j,k] ~ dunif(-10, 10)                                 #sex specific prior for gammas, beta coefficients fledging success
+      }
+      
+      for (k in 2:12){
+      delta[j,k] ~ dnorm(0, 0.1)                                  #sex specific prior for deltas, beta coefficients survival
+      }
+      
+    }
+    
+    
+    p[1,1] ~ dbeta(1,1)                                           #priors for sex and VHF specific recovery and recapture/resighting
+    p[1,2] ~ dbeta(1,1)
+    p[2,1] ~ dbeta(1,1)
+    p[2,2] ~ dbeta(1,1)
+    r[1,1] ~ dbeta(1,1)
+    r[1,2] ~ dbeta(1,1)
+    r[2,1] ~ dbeta(1,1)
+    r[2,2] ~ dbeta(1,1)
+    
+    
+
+    for (t in 1:(n.years-1)){                                       #priors for year specific precision of cort
+      
+      sigma.cort.r[t] ~ dgamma(1,1)
+      tau.cort.r[t] = 1/(sigma.cort.r[t] * sigma.cort.r[t])
+      sigma.cort.b[t] ~ dgamma(1,1)
+      tau.cort.b[t] = 1/(sigma.cort.b[t] * sigma.cort.b[t])
+      }
+
+
+    for (i in 1:I){
+    
+      z[i,f[i]] <- 1
+      
+      for (t in f[i]:(n.years-1)){                                          #linear predictor for nr. eggs
+        log(psi.e[i,t]) = alpha[sex[i],1] +
+                          alpha[sex[i],2] * age.cat[i,t] +                  #age category, experienced or unexperienced
+                          alpha[sex[i],3] * lay.d.x[i,t] +                  #laying date
+                          alpha[sex[i],4] * preytot.play.pl.x[i,t] +        #prey index for plates one month before laying
+                          alpha[sex[i],5] * preytot.play.tr.x[i,t]          #prey index for transects one month before laying
+                                  
+      }
+      
+
+      for (t in f[i]:(n.years-1)){                                          #linear predictor hatching success
+        logit(rho.n[i,t]) = beta[sex[i],1] +
+                            beta[sex[i],2] * age.cat[i,t] +                 #age category, experienced or unexperienced
+                            beta[sex[i],3] * egg2.x[i,t] +                  #number of annually produced eggs
+                            beta[sex[i],4] * lay.d.x[i,t] +                 #laying date
+                            beta[sex[i],5] * BCIe.x[i,t] +                  #body condition after egg laying
+                            beta[sex[i],6] * preytot.lay.pl.x[i,t] +        #prey index for plates at laying of first egg
+                            beta[sex[i],7] * preytot.lay.tr.x[i,t]          #prey index for transects at laying of first egg
+      }
+      
+      for (t in f[i]:(n.years-1)){                                          #linear predictor fledging success
+        logit(rho.f[i,t]) = gamma[sex[i],1] +
+                            gamma[sex[i],2] * age.cat[i,t] +                #age category, experienced or unexperienced
+                            gamma[sex[i],3] * nestling2.x[i,t] +            #number of annually produced nestlings
+                            gamma[sex[i],4] * lay.d.x[i,t] +                #laying date
+                            gamma[sex[i],5] * BCIn.x[i,t] +                 #body condition during nestling phase
+                            gamma[sex[i],6] * preytot.nestling.pl.x[i,t] +  #prey index for plates during nestling period
+                            gamma[sex[i],7] * preytot.nestling.tr.x[i,t]    #prey index for transects during nestling period
+      }
+      
+      
+
+      for (t in (f[i]+1):n.years){
+      
+
+        logit(phi[i,t-1]) = delta[sex[i],1] +                               #linear predictor for survival
+                            delta[sex[i],2] * age.cat[i,t-1] +
+                            delta[sex[i],3] * BCIn.x[i,t-1] +               # body condition during nestling phase
+                            delta[sex[i],4] * nestling2.x[i,t-1] +          # number of total nestlings produced
+                            delta[sex[i],5] * fledge2.x[i,t-1] +            # number of fledglings produced
+                            delta[sex[i],6] * cort.b.x[i,t-1] +             # cort baseline
+                            delta[sex[i],7] * cort.r.x[i,t-1] +             # cort response
+                            delta[sex[i],8] * col.p.x[i,t-1] +              # coloration, point diameter
+                            delta[sex[i],9] * preytot.lay.pl.x[i,t-1] +     # prey index for plates during at laying from first egg
+                            delta[sex[i],10] * preytot.lay.tr.x[i,t-1] +    # prey index for transects during at laying from first egg
+                            delta[sex[i],11] * preytot.w1.pl.x[i,t-1] +     # prey index for plates during early winter (Nov, Dec)
+                            delta[sex[i],12] * preytot.w1.tr.x[i,t-1]       # prey index for transects during early winter (Nov, Dec)
+                            #delta[sex[i],] * snowdays5s.x[i,t-1]           # number of days with >5cm snow during oncoming winter
+                            #delta[sex[i],] * tdlow5w.x[1,t-1]              # number of days with temp <5 degrees during winter
+                            
+
+
+        z[i,t] ~ dbern(z[i,t-1] * phi[i,t-1])                               # latent state  
+        alive[i,t] ~ dbern(z[i,t] * p[sex[i], gps[i,t-1]])                  # the recapture probability
+        dead[i,t] ~ dbern((z[i,t-1] - z[i,t]) * r[sex[i], gps[i,t-1]])      # the recovery probability
+      }
+      
+      for (t in f[i]:(n.years-1)){                                          #sampling missing values in the data, with pre-definied parameters
+        egg2[i,t] ~ dpois(psi.e[i,t])
+        egg2.x[i,t]=(egg2[i,t]-egg2.mean)/egg2.sd
+        nestling2[i,t] ~ dbin(rho.n[i,t], egg2[i,t])
+        nestling2.x[i,t]=(nestling2[i,t]-nestling2.mean)/nestling2.sd
+        fledge2[i,t] ~ dbin(rho.f[i,t], nestling2[i,t])
+        fledge2.x[i,t]=(fledge2[i,t]-fledge2.mean)/fledge2.sd
+        lay.d.x[i,t] ~ dnorm(mu.lay.d[t], tau.lay.d[t])
+        col.p.x[i,t]=(col.p[i,t]-col.p.mean)/col.p.sd
+        cort.r.x[i,t]=(cort.r[i,t]-cort.r.mean)/cort.r.sd
+        cort.b.x[i,t]=(cort.b[i,t]-cort.b.mean)/cort.b.sd
+        BCIe.x[i,t] ~ dnorm(mu.bcie[sex[i],t], tau.bcie[sex[i],t])
+        BCIn.x[i,t] ~ dnorm(mu.bcin[sex[i],t], tau.bcin[sex[i],t])
+        preytot.lay.pl.x[i,t] ~ dnorm(mu.lay.pl[t], tau.lay.pl[t])
+        preytot.play.pl.x[i,t] ~ dnorm(mu.play.pl[t], tau.play.pl[t]) 
+        preytot.nestling.pl.x[i,t] ~ dnorm(mu.nestling.pl[t], tau.nestling.pl[t])
+        preytot.w1.pl.x[i,t] ~ dnorm(mu.w1.pl[t], tau.w1.pl[t])
+        preytot.lay.tr.x[i,t] ~ dnorm(mu.lay.tr[t], tau.lay.tr[t])
+        preytot.play.tr.x[i,t] ~ dnorm(mu.play.tr[t], tau.play.tr[t]) 
+        preytot.nestling.tr.x[i,t] ~ dnorm(mu.nestling.tr[t], tau.nestling.tr[t])
+        preytot.w1.tr.x[i,t] ~ dnorm(mu.w1.tr[t], tau.w1.tr[t])
+
+      }
+      
+      for(t in (f[i]+1):(n.years-1)){
+        col.p[i,t] ~ dnorm(col.p[i,t-1], tau.col.p[sex[i]])
+        cort.r[i,t] ~ dnorm(cort.r[i,t-1], tau.cort.r[t])
+        cort.b[i,t] ~ dnorm(cort.b[i,t-1], tau.cort.b[t])
+
+      }
+
+    }
+
+# end model
+  }
+  ",fill = TRUE)
+sink()
+
+```
+
+```{r}
+jags.data <- list(alive = alive, dead = dead, sex = sex, n.years = ncol(alive), gps = gps, f = f, I = nrow(alive), z = z,
+                  age.cat = age.cat,
+                  egg2 = egg2, 
+                    egg2.sd = sd(egg2, na.rm=T), 
+                    egg2.mean = mean(egg2, na.rm=T),
+                  nestling2 = nestling2, 
+                    nestling2.sd = sd(nestling2, na.rm=T), 
+                    nestling2.mean = mean(nestling2, na.rm=T),
+                  fledge2 = fledge2, 
+                    fledge2.sd = sd(fledge2, na.rm=T), 
+                    fledge2.mean = mean(fledge2, na.rm=T),
+                  col.p = col.p, 
+                    col.p.sd = sd(col.p, na.rm=T),
+                    col.p.mean = mean(col.p, na.rm=T),
+                  cort.r = cort.r, 
+                    cort.r.sd = sd(cort.r, na.rm=T), 
+                    cort.r.mean = mean(cort.r, na.rm=T),
+                  col = col, 
+                    col.sd = sd(col, na.rm=T),
+                    col.mean = mean(col, na.rm=T),
+                  cort.b = cort.b, 
+                    cort.b.sd = sd(cort.b, na.rm=T), 
+                    cort.b.mean = mean(cort.b, na.rm=T),
+                  lay.d.x=lay.d.x,
+                    tau.lay.d=1/(colSds(lay.d.x, na.rm=T))^2, 
+                    mu.lay.d=colMeans(lay.d.x, na.rm=T),
+                  BCIe.x = BCIe.x, 
+                    tau.bcie=rbind((1/(colSds(BCIe.x[sex==1,], na.rm=T))^2),(1/(colSds(BCIe.x[sex==2,], na.rm=T))^2)), 
+                    mu.bcie=rbind(colMeans(BCIe.x[sex==1,], na.rm=T),colMeans(BCIe.x[sex==2,], na.rm=T)),
+                  BCIn.x = BCIn.x, 
+                    tau.bcin=rbind((1/(colSds(BCIn.x[sex==1,], na.rm=T))^2),(1/(colSds(BCIn.x[sex==2,], na.rm=T))^2)), 
+                    mu.bcin=rbind(colMeans(BCIn.x[sex==1,], na.rm=T),colMeans(BCIn.x[sex==2,], na.rm=T)),
+                  preytot.play.pl.x = preytot.play.pl.x, 
+                    tau.play.pl=1/(colSds(preytot.play.pl.x, na.rm=T))^2, 
+                    mu.play.pl=colMeans(preytot.play.pl.x, na.rm=T),
+                  preytot.lay.pl.x = preytot.lay.pl.x, 
+                    tau.lay.pl=1/(colSds(preytot.lay.pl.x, na.rm=T))^2, 
+                    mu.lay.pl=colMeans(preytot.lay.pl.x, na.rm=T),
+                  preytot.nestling.pl.x = preytot.nestling.pl.x,
+                    tau.nestling.pl=1/(colSds(preytot.nestling.pl.x, na.rm=T))^2, 
+                    mu.nestling.pl=colMeans(preytot.nestling.pl.x, na.rm=T),
+                  preytot.w1.pl.x = preytot.w1.pl.x, 
+                    tau.w1.pl=1/(colSds(preytot.w1.pl.x, na.rm=T))^2, 
+                    mu.w1.pl=colMeans(preytot.w1.pl.x, na.rm=T),
+                  preytot.play.tr.x = preytot.play.tr.x, 
+                    tau.play.tr=1/(colSds(preytot.play.tr.x, na.rm=T))^2, 
+                    mu.play.tr=colMeans(preytot.play.tr.x, na.rm=T),
+                  preytot.lay.tr.x = preytot.lay.tr.x, 
+                    tau.lay.tr=1/(colSds(preytot.lay.tr.x, na.rm=T))^2, 
+                    mu.lay.tr=colMeans(preytot.lay.tr.x, na.rm=T),
+                  preytot.nestling.tr.x = preytot.nestling.tr.x,
+                    tau.nestling.tr=1/(colSds(preytot.nestling.tr.x, na.rm=T))^2, 
+                    mu.nestling.tr=colMeans(preytot.nestling.tr.x, na.rm=T),
+                  preytot.w1.tr.x = preytot.w1.tr.x, 
+                    tau.w1.tr=1/(colSds(preytot.w1.tr.x, na.rm=T))^2, 
+                    mu.w1.tr=colMeans(preytot.w1.tr.x, na.rm=T)
+                  )
+                  
+
+parameters <- c("p", "r", "alpha", "beta", "gamma", "delta", "m.rho.n")
+
+
+inits <- function(){list()}
+
+nc <- 4
+nt <- 25
+ni <- 25000
+nb <- 1000
+
+
+D.1 <- jags(jags.data, inits, parameters, "D.1.jags", parallel = T,
+           n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb)
+
+
+```
+
+print model estimates
+```{r}
+
+print(D.1, digits=3)
+
+```
+
